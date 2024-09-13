@@ -1,0 +1,267 @@
+---
+title: "Power curves using simr and open datasets"
+output: html_notebook
+---
+
+Code for MA project investigating statistical power for small effect sizes. Full thesis text can be found here:  https://dspace.library.uvic.ca/items/535f7ac3-1783-4ca8-bdf3-0ca6487baa87
+
+Perea et al. (2015) data:
+
+- Masked priming lexial decision task
+- 40 participants ("SUBJECT")
+- 120 stimuli items ("ITEM")
+- experimental conditions: repetition vs. unrelated priming ("REPETITION")
+- also includes case alternation but we won't be using that
+- 37ms priming effect between repetition conditions
+- already cleaned for outliers <250 ms and >1500 ms
+- full citation: Perea, M., Vergara-Martínez, M., & Gomez, P. (2015). Resolving the locus of cAsE aLtErNaTiOn effects in visual word recognition: Evidence from masked priming. Cognition, 142, 39–43. https://doi.org/10.1016/j.cognition.2015.05.007
+- methodology from Brysbaert, M., & Stevens, M. (2018). Power Analysis and Effect Size in Mixed Effects Models: A Tutorial. Journal of Cognition, 1(1), 1–20. https://doi.org/10.5334/joc.10
+- citation for simr: Green, P., & MacLeod, C. J. (2016). simr: An R package for power analysis of generalized linear mixed models by simulation. Methods in Ecology and Evolution, 7(4), 493–498. https://doi.org/10.1111/2041-210X.12504
+
+
+
+# Preparing the dataset
+
+```{r}
+# loading the appropriate libraries
+library(tidyverse)
+library(lme4)
+library(optimx)
+library(afex)
+library(simr)
+
+
+# loading and cleaning data
+perea37 <- read.csv("data/perea_for_analysis.csv")
+perea37 <- na.omit(perea37)
+head(perea37)
+
+
+# taking a look at the distribution of the data
+unrel_only <- subset(perea37, REPETITION=="unrelated")
+hist(unrel_only$RT, 50)
+mean(unrel_only$RT)
+
+rep_only <- subset(perea37, REPETITION=="repeated")
+hist(rep_only$RT, 50)
+mean(rep_only$RT)
+```
+
+
+# Functions for finding and setting priming effect
+
+These functions find and alter the priming effect, aka the difference in mean RT between the related and unrelated conditions. The second function adds a constant to each RT in the "related" condition to alter the priming effect. Since this is a linear transformation, the shape of the distribution is not affected and the relationships between each data point are preserved. Linear transformations like these are used generally uncontroversially throughout social sciences methodologies.
+
+```{r}
+# function for finding the priming effect (will come in handy later)
+priming_effect <- function(x) {
+  unrel_pe <- subset(x, REPETITION=="unrelated")
+  rel_pe <- subset(x, REPETITION=="repeated")
+  return(mean(unrel_pe$RT) - mean(rel_pe$RT))
+}
+
+# testing priming_effect, should output 36.95764
+priming_effect(perea37)
+
+
+# function for creating specific priming effect
+# x = dataset to modify (always perea37), y = intended priming effect
+make_effect <- function(x, y) {
+  pe <- priming_effect(x)
+  toadd <- pe - y
+  unrel_me <- subset(x, REPETITION=="unrelated")
+  rel_me <- subset(x, REPETITION=="repeated")
+  if(toadd > 0)
+    rel_me$RT = rel_me$RT+toadd
+  if(toadd < 0)
+    rel_me$RT = rel_me$RT-abs(toadd)
+  x <-rbind(rel_me,unrel_me)
+  return(x)
+}
+
+# testing make_effect, should output 15
+perea15 <- make_effect(perea37, 15)
+priming_effect(perea15)
+
+# double-checking make_effect, manually calculating priming effect in the dataset
+temp_unrel_only <- subset(perea15, REPETITION=="unrelated")
+temp_rep_only <- subset(perea15, REPETITION=="repeated")
+mean(temp_unrel_only$RT)-mean(temp_rep_only$RT)
+```
+
+# Power curve for 37ms effect along ITEM and SUBJECT
+
+Testing the technique by replicating the results from Brysbaert & Stevens (2018). This section uses the powerCurve function from simr to assess power for increasing numbers of items (keeping number of participants constant) or increasing number of participants (keeping number of items constant). nsim in the powerCurve function is used to set the number of simulated datasets used at each level.
+
+```{r}
+# add invRT because Brysbaert & Stevens (2018) did it
+perea37$invRT = -1000/perea37$RT
+
+# checking priming effect
+priming_effect(perea37)
+
+# setting model for power curve
+# optimx optimizer lets full random effects structure converge
+fit37 <- lmer(invRT ~ REPETITION + (1|ITEM) + (1 + REPETITION|SUBJECT),
+            data=perea37,
+            control=lmerControl(optimizer = "optimx", calc.derivs = FALSE, optCtrl = list(method = "nlminb", starttests = FALSE, kkt =FALSE)))
+
+summary(fit37)
+
+# curve 1: 37ms effect along ITEM
+pc1 <- powerCurve(fit37, along="ITEM", nsim=50)
+plot(pc1) + abline(v=39) +
+  title(main = "Power Curve for 37ms priming effect along ITEM")
+
+# curve 2: 37ms effect along SUBJECT
+pc2 <- powerCurve(fit37, along="SUBJECT", nsim=50)
+plot(pc2) + abline(v=6.5) +
+  title(main = "Power Curve for 37ms priming effect along SUBJECT")
+```
+
+
+# Power curve for 11.38ms effect along ITEM and SUBJECT
+
+This section applies the technique from above to an 11.38ms effect to investigate the necessary numbers of items and participants to detect an effect so small, compared to the 37ms priming effect used in the tests above.
+
+
+## Preparing the dataset and fitting a glm
+
+```{r}
+# adjust priming effect using make_effect
+perea11 <- make_effect(perea37, 11.38)
+
+# checking output of make_effect
+priming_effect(perea11)
+
+temp_unrel_only <- subset(perea11, REPETITION=="unrelated")
+hist(temp_unrel_only$RT, 50)
+mean(temp_unrel_only$RT)
+
+temp_rep_only <- subset(perea11, REPETITION=="repeated")
+hist(temp_rep_only$RT, 50)
+mean(temp_rep_only$RT)
+
+
+# fitting a glm to the dataset
+# only random effects by intercept are included because including all random slopes and random slopes
+# by participant caused convergence errors
+# random slopes by item would not make sense, as the items do not cross the repetition condition
+# see "Things that did not work" at the end for more details
+fit <- glmer(RT ~ REPETITION + (1|ITEM) + (1|SUBJECT),
+            data=perea11,
+            family=gaussian,
+            control=lmerControl(optimizer = "optimx", calc.derivs = FALSE, optCtrl = list(method = "nlminb", starttests = FALSE, kkt =FALSE)))
+
+summary(fit)
+
+#testing model fit by plotting residuals
+res <- resid(fit)
+plot(fitted(fit), res) + abline(h=0)
+plot(res)
+qqnorm(res) + qqline(res)
+
+# testing model fit by AIC, model with random intercepts results in lowest AIC even with added parameters
+fit_participant_only<- glmer(RT ~ REPETITION + (1|SUBJECT),
+            data=perea11,
+            family=gaussian,
+            control=lmerControl(optimizer = "optimx", calc.derivs = FALSE, optCtrl = list(method = "nlminb", starttests = FALSE, kkt =FALSE)))
+
+fit_item_only <- glmer(RT ~ REPETITION + (1|ITEM),
+            data=perea11,
+            family=gaussian,
+            control=lmerControl(optimizer = "optimx", calc.derivs = FALSE, optCtrl = list(method = "nlminb", starttests = FALSE, kkt =FALSE)))
+
+fit_no_random_effects <- lm(RT ~ REPETITION,
+            data=perea11)
+
+anova(fit,fit_participant_only,fit_item_only,fit_no_random_effects)
+```
+
+
+## Power curve for 40 participants
+
+More items than were available in the original dataset were necessary to reach 80% power at the given levels, so simulation was used again to create a dataset with 200 items, based on the glm fitted in the previous chunk. The number of simulations at each level was also increased to 1000, compared to the 50 that were used in Brysbaert & Stevens (2018), to reduce error.
+
+```{r}
+# simulating more items
+more_items <- extend(fit, along="ITEM", n=200)
+
+# power curve for 11.38ms effect along ITEM, including extending number of items to 200
+# note that nsim = 1000, compared to 50 in the Brysbaert & Stevens (2018) protocol
+pc_moreitems <- powerCurve(more_items, along="ITEM", breaks=c(100,120,140,160,180,200), nsim=1000)
+plot(pc_moreitems) +abline(v=145) +
+  title(main = "Estimated power for an 11.38ms priming effect
+        with 40 participants and 100-200 items")
+
+# spot-testing power for 145 items, 40 participants, given results of powerCurve
+item145 <- extend(fit, along="ITEM", n=145)
+power_item145 <- powerSim(item145)
+```
+
+
+## Power curve for 120 items
+
+More participants than were available in the original dataset were necessary to reach 80% power at the given levels, so simulation was used again to create a dataset with 80 participants, based on the glm fitted in the previous chunk. The number of simulations at each level was again increased to 1000.
+
+```{r}
+# simulating more participants 
+more_participants <- extend(fit, along="SUBJECT", n=80)
+
+# power curve for 11.38ms effect along PARTICIPANT, including extending number of items to 200
+# note that nsim = 1000, compared to 50 in the Brysbaert & Stevens (2018) protocol
+more_participants <- powerCurve(more_participants, along="SUBJECT", breaks=c(30,35,40,45,50,55,60,65,70,75,80), nsim=1000)
+plot(more_participants) + abline(v=45) +
+  title(main = "Estimated power for an 11.38ms priming effect
+        with 120 items and 30-80 participants")
+
+# spot-testing power for 120 items, 47 participants, given results of powerCurve
+participant47 <- extend(fit, along="SUBJECT", n=47)
+power_participant47 <- powerSim(participant47)
+```
+
+
+
+## Things that did not work
+
+Tracking all the things that didn't work in this project so that I don't try to do them again! The glms that resulted in convergence errors are noted here, as well as some ways of saving the output of powerCurve (saving as rdata and png)
+
+```{r}
+# all the models that I tried to fit that didn't work
+
+# fitting all slopes result in convergence errors
+fit_all_slopes <- glmer(stdRT ~ REPETITION + (1+REPETITION|ITEM) + (1+REPETITION|SUBJECT),
+            data=perea11,
+            family=gaussian,
+            control=lmerControl(optimizer = "optimx", calc.derivs = FALSE, optCtrl = list(method = "nlminb", starttests = FALSE, kkt =FALSE)))
+
+summary(fit_all_slopes) #convergence errors
+
+# fitting with random intercepts and slope by item did not result in a convergence error, but makes no sense
+# REPETITION doesn't cross ITEM
+fit_item <- glmer(stdRT ~ REPETITION + (1+REPETITION|ITEM) + (1|SUBJECT), # + (0+REPETITION|SUBJECT),
+            data=perea11,
+            family=gaussian,
+            control=lmerControl(optimizer = "optimx", calc.derivs = FALSE, optCtrl = list(method = "nlminb", starttests = FALSE, kkt =FALSE)))
+
+summary(fit_item) #converged but makes no sense
+
+# fitting with random intercepts and slope by participant resulted in convergence errors
+fit_participant <- glmer(stdRT ~ REPETITION + (1|ITEM) + (1+REPETITION|SUBJECT), # + (0+REPETITION|SUBJECT),
+            data=perea11,
+            family=gaussian,
+            control=lmerControl(optimizer = "optimx", calc.derivs = FALSE, optCtrl = list(method = "nlminb", starttests = FALSE, kkt =FALSE)))
+
+summary(fit_participant) #convergence error
+
+## SAVE AS RDATA FOR POWER CURVES DOESN'T WORK
+save(pc3, file="pc_item_11ms.RData")
+load("pc3") #ERROR: cannot open compressed file 'pc3', probable reason 'No such file or directory'Error in readChar(con, 5L, useBytes = TRUE) : cannot open the connection
+
+## saving plot as PNG also didn't work?
+png('pc_item_plot.png')
+plot(pc3) + abline(v=94) +
+  title(main = "Power Curve for 11.38ms priming effect along ITEM")
+dev.off()
+
+```
